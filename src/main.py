@@ -327,6 +327,108 @@ def get_file(args: text) -> text:
     })
 
 
+# ---------------------------------------------------------------------------
+# Chunked download — lets another canister pull a large file (e.g. a WASM)
+# one slice at a time, staying under the ~2 MiB inter-canister message budget.
+# The `_icc` variants take positional text args because Basilisk's Candid
+# encoder treats a JSON dict string `{...}` as a record on cross-canister calls.
+# ---------------------------------------------------------------------------
+
+# Per-chunk read cap. Base64-encoding a slice in WASI Python is instruction
+# heavy, so keep chunks small (128 KB) to stay well under the per-message budget.
+_MAX_CHUNK_READ_BYTES = 128 * 1024
+
+
+@query
+def get_file_size(args: text) -> text:
+    """Return the byte size of a stored file.
+
+    Args (JSON): {"namespace": str, "path": str}
+    Returns JSON: {"size": int, "content_type": str, "sha256": str} | {"error": str}
+    """
+    params = json.loads(args)
+    namespace = params["namespace"]
+    path = params["path"].lstrip("/")
+
+    fp = _file_path(namespace, path)
+    try:
+        size = os.path.getsize(fp)
+    except FileNotFoundError:
+        return json.dumps({"error": f"Not found: {namespace}/{path}"})
+
+    meta = _load_meta(namespace)
+    file_info = meta.get("files", {}).get(path, {})
+    return json.dumps({
+        "size": size,
+        "content_type": file_info.get("content_type") or _guess_content_type(path),
+        "sha256": file_info.get("sha256", ""),
+    })
+
+
+@query
+def get_file_chunk(args: text) -> text:
+    """Return a slice of a stored file as base64.
+
+    Args (JSON): {"namespace": str, "path": str, "offset": int, "length": int}
+    Returns JSON: {"content_b64": str, "offset": int, "length": int,
+                   "total_size": int, "eof": bool} | {"error": str}
+    """
+    params = json.loads(args)
+    namespace = params["namespace"]
+    path = params["path"].lstrip("/")
+    offset = int(params.get("offset", 0))
+    length = int(params.get("length", _MAX_CHUNK_READ_BYTES))
+    if length <= 0 or length > _MAX_CHUNK_READ_BYTES:
+        length = _MAX_CHUNK_READ_BYTES
+
+    fp = _file_path(namespace, path)
+    try:
+        size = os.path.getsize(fp)
+    except FileNotFoundError:
+        return json.dumps({"error": f"Not found: {namespace}/{path}"})
+
+    if offset < 0 or offset > size:
+        return json.dumps({"error": f"Offset {offset} out of range (size={size})"})
+
+    with open(fp, "rb") as f:
+        f.seek(offset)
+        chunk = f.read(length)
+
+    return json.dumps({
+        "content_b64": base64.b64encode(chunk).decode("ascii"),
+        "offset": offset,
+        "length": len(chunk),
+        "total_size": size,
+        "eof": (offset + len(chunk)) >= size,
+    })
+
+
+@query
+def get_file_size_icc(namespace: text, path: text) -> text:
+    """Inter-canister variant of get_file_size (positional text args)."""
+    return get_file_size(json.dumps({"namespace": namespace, "path": path}))
+
+
+@query
+def get_file_chunk_icc(namespace: text, path: text, offset: text, length: text) -> text:
+    """Inter-canister variant of get_file_chunk.
+
+    `offset` and `length` are decimal strings; pass "0"/"" for length to use
+    the default chunk size.
+    """
+    try:
+        off = int(offset) if offset else 0
+        ln = int(length) if length else _MAX_CHUNK_READ_BYTES
+    except (TypeError, ValueError):
+        return json.dumps({"error": "offset and length must be integers"})
+    return get_file_chunk(json.dumps({
+        "namespace": namespace,
+        "path": path,
+        "offset": off,
+        "length": ln,
+    }))
+
+
 @query
 def get_stats() -> text:
     """Return overall registry statistics."""
