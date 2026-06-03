@@ -776,11 +776,17 @@ def _upload_key(namespace: str, path: str) -> str:
 
 # In-memory state for chunked uploads in progress, keyed by "namespace/path".
 # This lives in the canister's Wasm heap, which persists between messages within
-# a single canister version — so we assemble the file and advance a streaming
-# SHA-256 incrementally as chunks arrive, instead of re-reading and re-hashing
-# the whole (potentially multi-MB) blob in one finalize message. The heap is
-# cleared only on upgrade; if that happens mid-upload, the client re-uploads
-# from chunk 0 (which resets the state below).
+# a single canister version — so we assemble the file incrementally as chunks
+# arrive, instead of re-reading the whole (potentially multi-MB) blob in one
+# finalize message. The heap is cleared only on upgrade; if that happens
+# mid-upload, the client re-uploads from chunk 0 (which resets the state below).
+#
+# NOTE: the registry does NOT compute a SHA-256 over the content. Hashing even
+# ~1 MB per message exceeds the IC's single-message instruction limit under
+# WASI CPython, and it is unnecessary: integrity is enforced end-to-end by the
+# consumer (Casals installs the WASM and the IC's install-time `module_hash`
+# must match the authorized hash, else the install is rolled back). The hash
+# stored here is whatever the uploader supplies, for reference/metadata only.
 _active_uploads = {}
 
 
@@ -789,8 +795,8 @@ def store_file_chunk(args: text) -> text:
     """Upload one chunk of a large file, assembling it incrementally.
 
     Chunks are expected in order (0, 1, 2, …); out-of-order chunks are staged on
-    disk and folded in once the gap is filled. The running SHA-256 and the
-    assembled file advance with each in-order chunk, so finalize stays cheap.
+    disk and folded in once the gap is filled. The assembled file advances with
+    each in-order chunk, so finalize stays a cheap metadata-only operation.
 
     Args (JSON): {
         "namespace": str,
@@ -827,7 +833,6 @@ def store_file_chunk(args: text) -> text:
     if chunk_index == 0 or st is None:
         open(assembly, "wb").close()  # truncate any prior partial assembly
         st = {
-            "hasher": hashlib.sha256(),
             "next": 0,
             "total": total_chunks,
             "content_type": content_type,
@@ -841,7 +846,6 @@ def store_file_chunk(args: text) -> text:
     if chunk_index == st["next"]:
         with open(assembly, "ab") as out:
             out.write(data)
-        st["hasher"].update(data)
         st["size"] += len(data)
         st["next"] += 1
         # Fold in any contiguous out-of-order chunks staged earlier.
@@ -851,7 +855,6 @@ def store_file_chunk(args: text) -> text:
                 buf = cf.read()
             with open(assembly, "ab") as out:
                 out.write(buf)
-            st["hasher"].update(buf)
             st["size"] += len(buf)
             os.remove(sfp)
             st["staged"].discard(st["next"])
@@ -875,10 +878,11 @@ def store_file_chunk(args: text) -> text:
 def finalize_chunked_file(args: text) -> text:
     """Finalize a streamed upload: promote the assembled file and record metadata.
 
-    The file was assembled and hashed incrementally by store_file_chunk, so this
-    is a cheap metadata operation (no full-file copy or re-hash).
+    The file was assembled incrementally by store_file_chunk, so this is a cheap
+    metadata operation (no full-file copy or hashing). The optional `sha256` is
+    stored as supplied by the uploader (see the module note on integrity).
 
-    Args (JSON): {"namespace": str, "path": str}
+    Args (JSON): {"namespace": str, "path": str, "sha256": str (optional)}
     """
     params = json.loads(args)
     namespace = params["namespace"]
@@ -917,7 +921,7 @@ def finalize_chunked_file(args: text) -> text:
     os.makedirs(os.path.dirname(fp), exist_ok=True)
     os.replace(assembly, fp)  # move, not copy — avoids re-reading the blob
 
-    sha256 = st["hasher"].hexdigest()
+    sha256 = (params.get("sha256") or "").strip().lower()
     total_size = st["size"]
     content_type = st["content_type"] or _guess_content_type(path)
     _active_uploads.pop(key, None)
