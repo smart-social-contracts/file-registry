@@ -765,14 +765,32 @@ def _chunk_file_path(namespace: str, path: str, chunk_index: int) -> str:
     return os.path.join(CHUNKS_DIR, f"{safe_key}_{chunk_index:04d}")
 
 
-def _pending_meta_path(namespace: str, path: str) -> str:
+def _assembly_path(namespace: str, path: str) -> str:
     safe_key = f"{namespace}__{path.replace('/', '__')}"
-    return os.path.join(CHUNKS_DIR, f"{safe_key}__pending.json")
+    return os.path.join(CHUNKS_DIR, f"{safe_key}__assembly")
+
+
+def _upload_key(namespace: str, path: str) -> str:
+    return f"{namespace}/{path}"
+
+
+# In-memory state for chunked uploads in progress, keyed by "namespace/path".
+# This lives in the canister's Wasm heap, which persists between messages within
+# a single canister version — so we assemble the file and advance a streaming
+# SHA-256 incrementally as chunks arrive, instead of re-reading and re-hashing
+# the whole (potentially multi-MB) blob in one finalize message. The heap is
+# cleared only on upgrade; if that happens mid-upload, the client re-uploads
+# from chunk 0 (which resets the state below).
+_active_uploads = {}
 
 
 @update
 def store_file_chunk(args: text) -> text:
-    """Upload one chunk of a large file.
+    """Upload one chunk of a large file, assembling it incrementally.
+
+    Chunks are expected in order (0, 1, 2, …); out-of-order chunks are staged on
+    disk and folded in once the gap is filled. The running SHA-256 and the
+    assembled file advance with each in-order chunk, so finalize stays cheap.
 
     Args (JSON): {
         "namespace": str,
@@ -801,32 +819,64 @@ def store_file_chunk(args: text) -> text:
         return json.dumps({"error": f"Invalid base64: {e}"})
 
     _ensure_dirs()
-    with open(_chunk_file_path(namespace, path, chunk_index), "wb") as f:
-        f.write(data)
+    key = _upload_key(namespace, path)
+    assembly = _assembly_path(namespace, path)
+    st = _active_uploads.get(key)
 
-    pending_path = _pending_meta_path(namespace, path)
-    try:
-        with open(pending_path, "r") as f:
-            pending = json.loads(f.read())
-    except (FileNotFoundError, json.JSONDecodeError):
-        pending = {"total_chunks": total_chunks, "uploaded": [], "content_type": content_type}
+    # (Re)start the streaming assembly on chunk 0, or if heap state was lost.
+    if chunk_index == 0 or st is None:
+        open(assembly, "wb").close()  # truncate any prior partial assembly
+        st = {
+            "hasher": hashlib.sha256(),
+            "next": 0,
+            "total": total_chunks,
+            "content_type": content_type,
+            "size": 0,
+            "staged": set(),
+        }
+        _active_uploads[key] = st
 
-    if chunk_index not in pending["uploaded"]:
-        pending["uploaded"].append(chunk_index)
-    with open(pending_path, "w") as f:
-        f.write(json.dumps(pending))
+    st["total"] = total_chunks
+
+    if chunk_index == st["next"]:
+        with open(assembly, "ab") as out:
+            out.write(data)
+        st["hasher"].update(data)
+        st["size"] += len(data)
+        st["next"] += 1
+        # Fold in any contiguous out-of-order chunks staged earlier.
+        while st["next"] in st["staged"]:
+            sfp = _chunk_file_path(namespace, path, st["next"])
+            with open(sfp, "rb") as cf:
+                buf = cf.read()
+            with open(assembly, "ab") as out:
+                out.write(buf)
+            st["hasher"].update(buf)
+            st["size"] += len(buf)
+            os.remove(sfp)
+            st["staged"].discard(st["next"])
+            st["next"] += 1
+    elif chunk_index > st["next"]:
+        # Arrived early — stage on disk until the preceding chunks land.
+        with open(_chunk_file_path(namespace, path, chunk_index), "wb") as f:
+            f.write(data)
+        st["staged"].add(chunk_index)
+    # chunk_index < next => duplicate/replay; already assembled, ignore.
 
     return json.dumps({
         "ok": True,
         "chunk_index": chunk_index,
-        "uploaded": len(pending["uploaded"]),
+        "uploaded": st["next"],
         "total_chunks": total_chunks,
     })
 
 
 @update
 def finalize_chunked_file(args: text) -> text:
-    """Assemble previously uploaded chunks into the final file.
+    """Finalize a streamed upload: promote the assembled file and record metadata.
+
+    The file was assembled and hashed incrementally by store_file_chunk, so this
+    is a cheap metadata operation (no full-file copy or re-hash).
 
     Args (JSON): {"namespace": str, "path": str}
     """
@@ -838,19 +888,22 @@ def finalize_chunked_file(args: text) -> text:
     if err:
         return err
 
-    pending_path = _pending_meta_path(namespace, path)
-    try:
-        with open(pending_path, "r") as f:
-            pending = json.loads(f.read())
-    except FileNotFoundError:
-        return json.dumps({"error": f"No pending upload for {namespace}/{path}"})
+    key = _upload_key(namespace, path)
+    st = _active_uploads.get(key)
+    if st is None:
+        return json.dumps({
+            "error": f"No active upload for {namespace}/{path} "
+                     f"(state lost — re-upload from chunk 0)"
+        })
+    if st["next"] != st["total"]:
+        return json.dumps({
+            "error": f"Incomplete upload: assembled {st['next']} of {st['total']} chunks"
+        })
 
-    total_chunks = pending["total_chunks"]
-    content_type = pending.get("content_type") or _guess_content_type(path)
-
-    for i in range(total_chunks):
-        if not os.path.exists(_chunk_file_path(namespace, path, i)):
-            return json.dumps({"error": f"Missing chunk {i} of {total_chunks}"})
+    assembly = _assembly_path(namespace, path)
+    if not os.path.exists(assembly):
+        _active_uploads.pop(key, None)
+        return json.dumps({"error": f"Assembly file missing for {namespace}/{path}"})
 
     caller_str = ic.caller().to_str()
     _ensure_namespace_exists(namespace, caller_str)
@@ -862,21 +915,13 @@ def finalize_chunked_file(args: text) -> text:
 
     fp = _file_path(namespace, path)
     os.makedirs(os.path.dirname(fp), exist_ok=True)
+    os.replace(assembly, fp)  # move, not copy — avoids re-reading the blob
 
-    h = hashlib.sha256()
-    total_size = 0
-    with open(fp, "wb") as out:
-        for i in range(total_chunks):
-            chunk_path = _chunk_file_path(namespace, path, i)
-            with open(chunk_path, "rb") as cf:
-                chunk = cf.read()
-            out.write(chunk)
-            h.update(chunk)
-            total_size += len(chunk)
-            os.remove(chunk_path)
+    sha256 = st["hasher"].hexdigest()
+    total_size = st["size"]
+    content_type = st["content_type"] or _guess_content_type(path)
+    _active_uploads.pop(key, None)
 
-    os.remove(pending_path)
-    sha256 = h.hexdigest()
     now = ic.time()
     prev_version = old_info.get("current_version", 0) if old_info else 0
     new_version = prev_version + 1
