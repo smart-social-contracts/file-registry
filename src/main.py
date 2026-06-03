@@ -774,6 +774,25 @@ def _upload_key(namespace: str, path: str) -> str:
     return f"{namespace}/{path}"
 
 
+def _move_file(src: str, dst: str) -> None:
+    """Move src to dst. Prefer a metadata-only rename; fall back to a streamed
+    copy if the WASI runtime lacks os.replace/os.rename (some builds do)."""
+    if os.path.exists(dst):
+        os.remove(dst)
+    try:
+        os.rename(src, dst)
+        return
+    except (AttributeError, OSError):
+        pass
+    with open(src, "rb") as r, open(dst, "wb") as w:
+        while True:
+            buf = r.read(1024 * 1024)
+            if not buf:
+                break
+            w.write(buf)
+    os.remove(src)
+
+
 # In-memory state for chunked uploads in progress, keyed by "namespace/path".
 # This lives in the canister's Wasm heap, which persists between messages within
 # a single canister version — so we assemble the file incrementally as chunks
@@ -919,7 +938,7 @@ def finalize_chunked_file(args: text) -> text:
 
     fp = _file_path(namespace, path)
     os.makedirs(os.path.dirname(fp), exist_ok=True)
-    os.replace(assembly, fp)  # move, not copy — avoids re-reading the blob
+    _move_file(assembly, fp)  # move, not copy where possible — avoids re-reading
 
     sha256 = (params.get("sha256") or "").strip().lower()
     total_size = st["size"]
