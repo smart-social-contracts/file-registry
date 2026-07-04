@@ -2,6 +2,7 @@ import { Actor, HttpAgent } from '@dfinity/agent';
 import { idlFactory } from './declarations';
 import { get } from 'svelte/store';
 import { identity } from './auth';
+import { canisterHttpUrl, icHost, isLocalHost } from './ic-host';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -55,8 +56,8 @@ export type AclMap = Record<string, string[]>;
 // ---------------------------------------------------------------------------
 
 const CANISTER_ID = import.meta.env.VITE_CANISTER_ID ?? '';
-const IS_LOCAL = typeof window !== 'undefined' && window.location.hostname === 'localhost';
-const HOST = IS_LOCAL ? 'http://localhost:4943' : 'https://ic0.app';
+const IS_LOCAL = isLocalHost();
+const HOST = icHost();
 
 function _makeActor(id: any = null) {
   const agent = new HttpAgent({ identity: id ?? undefined, host: HOST });
@@ -211,8 +212,7 @@ export async function deleteNamespace(namespace: string) {
 
 export function fileUrl(namespace: string, path: string): string {
   if (!CANISTER_ID) return '#';
-  const host = IS_LOCAL ? `http://localhost:4943` : `https://${CANISTER_ID}.icp0.io`;
-  return `${host}/${namespace}/${path}`;
+  return `${canisterHttpUrl(CANISTER_ID)}/${namespace}/${path}`;
 }
 
 const CONTENT_TYPE_MAP: Record<string, string> = {

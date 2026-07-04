@@ -8,10 +8,7 @@ export const principal = writable('');
 
 let _authClient: AuthClient | null = null;
 
-const II_URL =
-  typeof window !== 'undefined' && window.location.hostname === 'localhost'
-    ? `http://localhost:4943?canisterId=rdmx6-jaaaa-aaaaa-aaadq-cai`
-    : 'https://identity.ic0.app';
+const II_URL = 'https://identity.ic0.app';
 
 function _applyIdentity(id: Identity) {
   identity.set(id);
