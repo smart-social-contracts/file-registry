@@ -55,13 +55,37 @@ export type AclMap = Record<string, string[]>;
 // Actor setup
 // ---------------------------------------------------------------------------
 
-const CANISTER_ID = import.meta.env.VITE_CANISTER_ID ?? '';
+function _canisterEnv(): Record<string, string> {
+  if (typeof document === 'undefined') return {};
+  const match = document.cookie.match(/(?:^|;\s*)ic_env=([^;]+)/);
+  if (!match) return {};
+  const env: Record<string, string> = {};
+  for (const pair of decodeURIComponent(match[1]).split('&')) {
+    const eq = pair.indexOf('=');
+    if (eq > 0) env[pair.slice(0, eq)] = pair.slice(eq + 1);
+  }
+  return env;
+}
+
+function _registryCanisterId(): string {
+  const fromBuild = import.meta.env.VITE_CANISTER_ID as string | undefined;
+  if (fromBuild) return fromBuild;
+  return _canisterEnv()['PUBLIC_CANISTER_ID:ic_file_registry'] ?? '';
+}
+
+const CANISTER_ID = _registryCanisterId();
 const IS_LOCAL = isLocalHost();
 const HOST = icHost();
 
 function _makeActor(id: any = null) {
   const agent = new HttpAgent({ identity: id ?? undefined, host: HOST });
   if (IS_LOCAL) agent.fetchRootKey().catch(() => {});
+  if (!CANISTER_ID) {
+    throw new Error(
+      'Backend canister ID not found. Expected VITE_CANISTER_ID at build time ' +
+        'or PUBLIC_CANISTER_ID:ic_file_registry in the ic_env cookie.'
+    );
+  }
   return Actor.createActor(idlFactory, { agent, canisterId: CANISTER_ID });
 }
 
