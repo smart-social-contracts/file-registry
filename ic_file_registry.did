@@ -101,6 +101,7 @@ service : {
   "get_file_size" : (text) -> (text) query;
   "get_file_chunk" : (text) -> (text) query;
   "get_file_size_icc" : (text, text) -> (text) query;
+  "list_files_icc" : (text) -> (text);
   "get_file_chunk_icc" : (text, text, text, text) -> (text) query;
   "get_stats" : () -> (text) query;
   "list_file_versions" : (text) -> (text) query;

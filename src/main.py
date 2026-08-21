@@ -409,6 +409,13 @@ def get_file_size_icc(namespace: text, path: text) -> text:
     return get_file_size(json.dumps({"namespace": namespace, "path": path}))
 
 
+@update
+def list_files_icc(namespace: text) -> text:
+    """Inter-canister list_files. Update (not query) so Casals can call it
+    from provision — IC inter-canister calls from updates are updates."""
+    return list_files(json.dumps({"namespace": namespace}))
+
+
 @query
 def get_file_chunk_icc(namespace: text, path: text, offset: text, length: text) -> text:
     """Inter-canister variant of get_file_chunk.
