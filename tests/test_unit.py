@@ -69,8 +69,13 @@ _guess_content_type = _mod._guess_content_type
 _file_path = _mod._file_path
 _meta_path = _mod._meta_path
 _chunk_file_path = _mod._chunk_file_path
-_pending_meta_path = _mod._pending_meta_path
 _http_response = _mod._http_response
+_load_approvals = _mod._load_approvals
+_save_approvals = _mod._save_approvals
+_current_file_hashes = _mod._current_file_hashes
+_content_matches = _mod._content_matches
+_approval_get_payload = _mod._approval_get_payload
+APPROVALS_FILE = _mod.APPROVALS_FILE
 _load_namespaces = _mod._load_namespaces
 _save_namespaces = _mod._save_namespaces
 _load_meta = _mod._load_meta
@@ -172,14 +177,70 @@ class TestPathHelpers(unittest.TestCase):
         self.assertIn("0009", p9)
         self.assertIn("0099", p99)
 
-    def test_pending_meta_path(self):
-        result = _pending_meta_path("extensions", "hello_world/entry.py")
-        self.assertIn(CHUNKS_DIR, result)
-        self.assertIn("pending.json", result)
+
+class TestApprovalHelpers(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_reg_dir = _mod.REGISTRY_DIR
+        self._orig_approvals_file = _mod.APPROVALS_FILE
+        self._orig_chunks_dir = _mod.CHUNKS_DIR
+        _mod.REGISTRY_DIR = self.tmpdir
+        _mod.APPROVALS_FILE = os.path.join(self.tmpdir, "_approvals.json")
+        _mod.CHUNKS_DIR = os.path.join(self.tmpdir, "_chunks")
+
+    def tearDown(self):
+        _mod.REGISTRY_DIR = self._orig_reg_dir
+        _mod.APPROVALS_FILE = self._orig_approvals_file
+        _mod.CHUNKS_DIR = self._orig_chunks_dir
+
+    def test_unapproved_namespace_payload(self):
+        payload = _approval_get_payload("extensions", None)
+        self.assertEqual(payload["approved"], False)
+        self.assertEqual(payload["status"], "unapproved")
+
+    def test_approved_payload_requires_matching_hashes(self):
+        _save_meta("extensions", {
+            "files": {
+                "entry.py": {"sha256": "abc123", "size": 1},
+            },
+        })
+        record = {
+            "status": "approved",
+            "approver": "marketplace-principal",
+            "approved_at": 123,
+            "file_hashes": {"entry.py": "abc123"},
+        }
+        payload = _approval_get_payload("extensions", record)
+        self.assertTrue(payload["approved"])
+        self.assertTrue(payload["content_matches"])
+        self.assertEqual(payload["approver"], "marketplace-principal")
+
+    def test_stale_approval_not_effective(self):
+        _save_meta("extensions", {
+            "files": {
+                "entry.py": {"sha256": "changed", "size": 1},
+            },
+        })
+        record = {
+            "status": "approved",
+            "approver": "marketplace-principal",
+            "approved_at": 123,
+            "file_hashes": {"entry.py": "abc123"},
+        }
+        payload = _approval_get_payload("extensions", record)
+        self.assertFalse(payload["approved"])
+        self.assertFalse(payload["content_matches"])
+        self.assertEqual(payload["status"], "approved")
+
+    def test_save_and_load_approvals(self):
+        data = {"extensions": {"status": "approved", "file_hashes": {"entry.py": "abc"}}}
+        _save_approvals(data)
+        self.assertEqual(_load_approvals(), data)
 
 
 # ---------------------------------------------------------------------------
-# Test: JSON file I/O helpers (using temp directory)
+# Test: _http_response helper
 # ---------------------------------------------------------------------------
 
 class TestNamespacesIO(unittest.TestCase):

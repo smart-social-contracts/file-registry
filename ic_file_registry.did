@@ -107,7 +107,10 @@ service : {
   "list_file_versions" : (text) -> (text) query;
   "get_file_at_version" : (text) -> (text) query;
   "get_acl" : () -> (text) query;
+  "get_namespace_approval" : (text) -> (text) query;
+  "get_namespace_approval_icc" : (text) -> (text) query;
   "store_file" : (text) -> (text);
+  "set_namespace_approval" : (text) -> (text);
   "delete_file" : (text) -> (text);
   "update_namespace" : (text) -> (text);
   "delete_namespace" : (text) -> (text);
