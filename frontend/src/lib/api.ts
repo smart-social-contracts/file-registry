@@ -68,9 +68,15 @@ function _canisterEnv(): Record<string, string> {
 }
 
 function _registryCanisterId(): string {
-  const fromBuild = import.meta.env.VITE_CANISTER_ID as string | undefined;
-  if (fromBuild) return fromBuild;
-  return _canisterEnv()['PUBLIC_CANISTER_ID:ic_file_registry'] ?? '';
+  // The asset canister's ic_env cookie carries the live id of every canister in
+  // the project, so it is correct in whatever environment this dist is served
+  // from. It must win over VITE_CANISTER_ID: a dist built against a local
+  // replica otherwise targets a nonexistent canister once deployed to mainnet.
+  // VITE_CANISTER_ID remains a fallback for a standalone dev server, which is
+  // served outside the asset canister and therefore gets no cookie.
+  const fromCookie = _canisterEnv()['PUBLIC_CANISTER_ID:ic_file_registry'];
+  if (fromCookie) return fromCookie;
+  return (import.meta.env.VITE_CANISTER_ID as string | undefined) ?? '';
 }
 
 const CANISTER_ID = _registryCanisterId();
