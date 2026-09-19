@@ -11,6 +11,8 @@ Storage layout (persistent filesystem, survives upgrades):
   /registry/_namespaces.json                       index of all namespaces
   /registry/_acl.json                              {namespace: [principal_str, ...]}
   /registry/_approvals.json                        {namespace: approval record}
+
+  /registry/_config.json                           registry-wide settings
   /registry/{namespace}/_meta.json                 file index with version history
   /registry/{namespace}/{path}                     current file content
   /registry/{namespace}/__versions/{path}/v{N}     archived version blobs
@@ -48,6 +50,11 @@ APPROVALS_FILE = "/registry/_approvals.json"
 APPROVERS_NAMESPACE = "_approvers"
 MAX_VERSIONS = 20
 VALID_APPROVAL_STATUSES = frozenset({"approved", "rejected"})
+
+CONFIG_FILE = "/registry/_config.json"
+MAX_VERSIONS = 20
+ANONYMOUS_PRINCIPAL = "2vxsx-fae"
+WILDCARD_NAMESPACE = "*"  # ACL key: publish on every namespace
 
 CONTENT_TYPES = {
     ".py":   "text/plain",
@@ -181,6 +188,27 @@ def _approval_get_payload(namespace: str, record: dict | None) -> dict:
         "file_count": len(snapshot),
     }
 
+def _default_config() -> dict:
+    return {"auto_grant_publishers": False}
+
+
+def _load_config() -> dict:
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            data = json.loads(f.read())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return _default_config()
+    cfg = _default_config()
+    if "auto_grant_publishers" in data:
+        cfg["auto_grant_publishers"] = bool(data["auto_grant_publishers"])
+    return cfg
+
+
+def _save_config(config: dict):
+    _ensure_dirs()
+    with open(CONFIG_FILE, "w") as f:
+        f.write(json.dumps(config))
+
 
 def _load_meta(namespace: str) -> dict:
     try:
@@ -286,12 +314,19 @@ def _require_publisher(namespace: str) -> str | None:
     if ic.is_controller(ic.caller()):
         return None
     caller = ic.caller().to_str()
+    if caller == ANONYMOUS_PRINCIPAL:
+        return json.dumps({"error": f"Unauthorized: not a publisher for namespace '{namespace}'"})
     acl = _load_acl()
     ns_acl = acl.get(namespace, [])
     if caller in ns_acl:
         return None
-    # Auto-grant: first authenticated caller to a new namespace becomes its publisher
-    if not ns_acl:
+    # `grant_publish {"namespace": "*"}`: a fleet publisher — the operator that
+    # runs `realms files publish` against every ext/… codex/… branding namespace.
+    # Controllers are the conductor and the multisig, which cannot upload.
+    if caller in acl.get(WILDCARD_NAMESPACE, []):
+        return None
+    config = _load_config()
+    if config.get("auto_grant_publishers") and namespace not in _load_namespaces():
         acl[namespace] = [caller]
         _save_acl(acl)
         return None
@@ -632,6 +667,10 @@ def get_namespace_approval_icc(namespace: text) -> text:
     """Inter-canister variant of get_namespace_approval (positional text arg)."""
     return get_namespace_approval(json.dumps({"namespace": namespace}))
 
+def get_config() -> text:
+    """Return registry config with defaults applied."""
+    return json.dumps(_load_config())
+
 
 # ---------------------------------------------------------------------------
 # Authenticated update endpoints
@@ -807,10 +846,29 @@ def delete_namespace(args: text) -> text:
 
 
 @update
+def set_config(args: text) -> text:
+    """Update registry config. Controller only.
+
+    Args (JSON): {"auto_grant_publishers": bool}
+    """
+    err = _require_controller()
+    if err:
+        return err
+
+    params = json.loads(args)
+    config = _load_config()
+    if "auto_grant_publishers" in params:
+        config["auto_grant_publishers"] = bool(params["auto_grant_publishers"])
+    _save_config(config)
+    return json.dumps({"ok": True, "config": config})
+
+
+@update
 def grant_publish(args: text) -> text:
     """Grant publish access to a principal for a namespace. Controller only.
 
-    Args (JSON): {"namespace": str, "principal": str}
+    Args (JSON): {"namespace": str, "principal": str}; namespace "*" grants
+    every namespace (fleet publisher).
     """
     err = _require_controller()
     if err:

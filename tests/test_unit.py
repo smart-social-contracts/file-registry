@@ -27,16 +27,42 @@ class _Subscriptable:
         return cls
 
 class _FakePrincipal:
+    def __init__(self, value: str):
+        self._value = value
+
+    def to_str(self):
+        return self._value
+
     @staticmethod
     def from_str(s):
-        return s
+        return _FakePrincipal(s)
 
-_mock_ic = type("ic_obj", (), {
-    "caller": lambda self: type("p", (), {"to_str": lambda s: "aaaaa-aa"})(),
-    "is_controller": lambda self, p: False,
-    "time": lambda self: 1_700_000_000_000_000_000,
-    "id": lambda self: type("p", (), {"to_str": lambda s: "aaaaa-aa"})(),
-})()
+
+class _MockIc:
+    def __init__(self):
+        self._caller = "aaaaa-aa"
+        self._is_controller = False
+
+    def set_caller(self, principal: str):
+        self._caller = principal
+
+    def set_controller(self, is_controller: bool):
+        self._is_controller = is_controller
+
+    def caller(self):
+        return _FakePrincipal(self._caller)
+
+    def is_controller(self, p):
+        return self._is_controller
+
+    def time(self):
+        return 1_700_000_000_000_000_000
+
+    def id(self):
+        return _FakePrincipal(self._caller)
+
+
+_mock_ic = _MockIc()
 
 _mock_basilisk = type(sys)("basilisk")
 _mock_basilisk.blob = bytes
@@ -82,8 +108,17 @@ _load_meta = _mod._load_meta
 _save_meta = _mod._save_meta
 _load_acl = _mod._load_acl
 _save_acl = _mod._save_acl
+_load_config = _mod._load_config
+_save_config = _mod._save_config
+_require_publisher = _mod._require_publisher
+get_config = _mod.get_config
+set_config = _mod.set_config
+ANONYMOUS_PRINCIPAL = _mod.ANONYMOUS_PRINCIPAL
 REGISTRY_DIR = _mod.REGISTRY_DIR
 CHUNKS_DIR = _mod.CHUNKS_DIR
+NAMESPACES_FILE = _mod.NAMESPACES_FILE
+ACL_FILE = _mod.ACL_FILE
+CONFIG_FILE = _mod.CONFIG_FILE
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +367,127 @@ class TestAclIO(unittest.TestCase):
         _save_acl(acl)
         result = _load_acl()
         self.assertEqual(result, acl)
+
+
+class TestConfigIO(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_config_file = _mod.CONFIG_FILE
+        self._orig_reg_dir = _mod.REGISTRY_DIR
+        self._orig_chunks_dir = _mod.CHUNKS_DIR
+        _mod.CONFIG_FILE = os.path.join(self.tmpdir, "_config.json")
+        _mod.REGISTRY_DIR = self.tmpdir
+        _mod.CHUNKS_DIR = os.path.join(self.tmpdir, "_chunks")
+
+    def tearDown(self):
+        _mod.CONFIG_FILE = self._orig_config_file
+        _mod.REGISTRY_DIR = self._orig_reg_dir
+        _mod.CHUNKS_DIR = self._orig_chunks_dir
+
+    def test_load_missing_config_returns_defaults(self):
+        result = _load_config()
+        self.assertEqual(result, {"auto_grant_publishers": False})
+
+    def test_save_and_load_config(self):
+        data = {"auto_grant_publishers": True}
+        _save_config(data)
+        result = _load_config()
+        self.assertEqual(result, data)
+
+
+class TestPublisherAcl(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_ns_file = _mod.NAMESPACES_FILE
+        self._orig_acl_file = _mod.ACL_FILE
+        self._orig_config_file = _mod.CONFIG_FILE
+        self._orig_reg_dir = _mod.REGISTRY_DIR
+        self._orig_chunks_dir = _mod.CHUNKS_DIR
+        _mod.NAMESPACES_FILE = os.path.join(self.tmpdir, "_namespaces.json")
+        _mod.ACL_FILE = os.path.join(self.tmpdir, "_acl.json")
+        _mod.CONFIG_FILE = os.path.join(self.tmpdir, "_config.json")
+        _mod.REGISTRY_DIR = self.tmpdir
+        _mod.CHUNKS_DIR = os.path.join(self.tmpdir, "_chunks")
+        _mock_ic.set_controller(False)
+        _mock_ic.set_caller("user-principal-1")
+
+    def tearDown(self):
+        _mod.NAMESPACES_FILE = self._orig_ns_file
+        _mod.ACL_FILE = self._orig_acl_file
+        _mod.CONFIG_FILE = self._orig_config_file
+        _mod.REGISTRY_DIR = self._orig_reg_dir
+        _mod.CHUNKS_DIR = self._orig_chunks_dir
+        _mock_ic.set_controller(False)
+        _mock_ic.set_caller("aaaaa-aa")
+
+    def _denied(self, namespace: str):
+        err = _require_publisher(namespace)
+        self.assertIsNotNone(err)
+        self.assertIn("Unauthorized", json.loads(err)["error"])
+
+    def test_controller_bypass(self):
+        _mock_ic.set_controller(True)
+        self.assertIsNone(_require_publisher("any_ns"))
+
+    def test_anonymous_denied_even_with_auto_grant(self):
+        _save_config({"auto_grant_publishers": True})
+        _mock_ic.set_caller(ANONYMOUS_PRINCIPAL)
+        self._denied("brand_new_ns")
+
+    def test_auto_grant_off_unknown_principal_denied_on_empty_acl_namespace(self):
+        _save_namespaces({
+            "existing_ns": {
+                "namespace": "existing_ns",
+                "created": 0,
+                "owner": "controller",
+                "description": "",
+            }
+        })
+        self._denied("existing_ns")
+        self.assertEqual(_load_acl(), {})
+
+    def test_auto_grant_off_explicitly_granted_principal_allowed(self):
+        _save_acl({"existing_ns": ["user-principal-1"]})
+        self.assertIsNone(_require_publisher("existing_ns"))
+
+    def test_wildcard_grant_covers_every_namespace(self):
+        _save_acl({"*": ["user-principal-1"]})
+        self.assertIsNone(_require_publisher("ext/x/1.0.0"))
+        self.assertIsNone(_require_publisher("codex/y/main"))
+        self.assertEqual(_load_acl(), {"*": ["user-principal-1"]})  # nothing auto-granted
+
+    def test_wildcard_grant_is_per_principal(self):
+        _save_acl({"*": ["someone-else"]})
+        self._denied("ext/x/1.0.0")
+
+    def test_auto_grant_on_unknown_principal_granted_on_new_namespace(self):
+        _save_config({"auto_grant_publishers": True})
+        self.assertIsNone(_require_publisher("brand_new_ns"))
+        self.assertEqual(_load_acl(), {"brand_new_ns": ["user-principal-1"]})
+
+    def test_auto_grant_on_denied_on_existing_namespace_with_empty_acl(self):
+        _save_config({"auto_grant_publishers": True})
+        _save_namespaces({
+            "existing_ns": {
+                "namespace": "existing_ns",
+                "created": 0,
+                "owner": "controller",
+                "description": "",
+            }
+        })
+        self._denied("existing_ns")
+        self.assertEqual(_load_acl(), {})
+
+    def test_set_config_rejects_non_controller(self):
+        result = json.loads(set_config(json.dumps({"auto_grant_publishers": True})))
+        self.assertIn("error", result)
+        self.assertIn("controller", result["error"])
+
+    def test_get_config_returns_defaults_before_write(self):
+        result = json.loads(get_config())
+        self.assertEqual(result, {"auto_grant_publishers": False})
 
 
 # ---------------------------------------------------------------------------

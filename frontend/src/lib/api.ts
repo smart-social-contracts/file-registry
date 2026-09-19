@@ -51,6 +51,10 @@ export interface Stats {
 
 export type AclMap = Record<string, string[]>;
 
+export interface RegistryConfig {
+  auto_grant_publishers: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Actor setup
 // ---------------------------------------------------------------------------
@@ -150,6 +154,11 @@ export async function getStats(): Promise<Stats> {
 
 export async function getAcl(): Promise<AclMap> {
   const raw = await _actor().get_acl();
+  return JSON.parse(raw);
+}
+
+export async function getConfig(): Promise<RegistryConfig> {
+  const raw = await _actor().get_config();
   return JSON.parse(raw);
 }
 

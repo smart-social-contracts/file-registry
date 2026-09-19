@@ -4,9 +4,9 @@
   import { goto } from '$app/navigation';
   import {
     listFiles, uploadFile, deleteFile, grantPublish, revokePublish,
-    deleteNamespace, getAcl, fileUrl, guessContentType, formatBytes, timeAgo,
+    deleteNamespace, getAcl, getConfig, fileUrl, guessContentType, formatBytes, timeAgo,
   } from '$lib/api';
-  import type { FileInfo, AclMap } from '$lib/api';
+  import type { FileInfo, AclMap, RegistryConfig } from '$lib/api';
   import { isAuthenticated, principal } from '$lib/auth';
   import { toasts } from '$lib/stores/toast';
   import ConfirmModal from '$lib/components/ConfirmModal.svelte';
@@ -15,6 +15,7 @@
 
   let files: FileInfo[] = [];
   let acl: AclMap = {};
+  let registryConfig: RegistryConfig = { auto_grant_publishers: false };
   let loading = true;
   let error = '';
   let search = '';
@@ -39,7 +40,11 @@
     loading = true;
     error = '';
     try {
-      [files, acl] = await Promise.all([listFiles(namespace), getAcl()]);
+      [files, acl, registryConfig] = await Promise.all([
+        listFiles(namespace),
+        getAcl(),
+        getConfig(),
+      ]);
     } catch (e: any) {
       error = e.message;
     } finally {
@@ -111,7 +116,14 @@
       newPrincipal = '';
       acl = await getAcl();
     } catch (e: any) {
-      aclError = e.message;
+      const msg = e.message ?? String(e);
+      if (/unauthorized|not a controller/i.test(msg)) {
+        aclError =
+          'Publisher access is managed by the registry controller. ' +
+          'Ask the controller to grant publish rights for this namespace.';
+      } else {
+        aclError = msg;
+      }
     }
   }
 
@@ -201,6 +213,15 @@
         </svg>
         Publisher Access Control
       </h3>
+      <p class="text-primary-500 text-sm">
+        Auto-grant new namespaces:
+        <span class="font-medium text-primary-700">
+          {registryConfig.auto_grant_publishers ? 'enabled' : 'disabled'}
+        </span>
+        {#if !registryConfig.auto_grant_publishers}
+          <span class="text-primary-400"> (controller-managed)</span>
+        {/if}
+      </p>
       {#if aclError}
         <p class="text-red-600 text-sm">{aclError}</p>
       {/if}

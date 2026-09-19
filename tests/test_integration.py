@@ -261,6 +261,34 @@ class TestChunkedUpload:
 
 
 # ---------------------------------------------------------------------------
+# Registry config
+# ---------------------------------------------------------------------------
+
+class TestRegistryConfig:
+    def test_get_config_defaults(self, canister):
+        result = call_canister("get_config")
+        assert result == {"auto_grant_publishers": False}
+
+    def test_set_config_round_trip(self, canister):
+        result = call_canister(
+            "set_config",
+            json.dumps({"auto_grant_publishers": True}),
+            update=True,
+        )
+        assert result.get("ok") is True
+        assert result["config"]["auto_grant_publishers"] is True
+        got = call_canister("get_config")
+        assert got["auto_grant_publishers"] is True
+
+        # Restore default for other tests.
+        call_canister(
+            "set_config",
+            json.dumps({"auto_grant_publishers": False}),
+            update=True,
+        )
+
+
+# ---------------------------------------------------------------------------
 # HTTP serving
 # ---------------------------------------------------------------------------
 
