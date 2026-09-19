@@ -667,6 +667,8 @@ def get_namespace_approval_icc(namespace: text) -> text:
     """Inter-canister variant of get_namespace_approval (positional text arg)."""
     return get_namespace_approval(json.dumps({"namespace": namespace}))
 
+
+@query
 def get_config() -> text:
     """Return registry config with defaults applied."""
     return json.dumps(_load_config())
