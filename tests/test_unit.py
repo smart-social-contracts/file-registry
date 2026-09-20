@@ -536,5 +536,117 @@ class TestHttpResponse(unittest.TestCase):
         self.assertEqual(headers["Content-Length"], "0")
 
 
+# ---------------------------------------------------------------------------
+# Test: package catalog (list_extensions / list_codices / latest_version /
+# get_extension_manifest) — issue #3
+# ---------------------------------------------------------------------------
+
+class TestPackageCatalog(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig = (_mod.REGISTRY_DIR, _mod.NAMESPACES_FILE, _mod.CHUNKS_DIR)
+        _mod.REGISTRY_DIR = self.tmpdir
+        _mod.NAMESPACES_FILE = os.path.join(self.tmpdir, "_namespaces.json")
+        _mod.CHUNKS_DIR = os.path.join(self.tmpdir, "_chunks")
+
+    def tearDown(self):
+        _mod.REGISTRY_DIR, _mod.NAMESPACES_FILE, _mod.CHUNKS_DIR = self._orig
+
+    def _namespace(self, ns, files):
+        """Create a namespace with the given {path: text} files, like store_file would."""
+        namespaces = _load_namespaces()
+        namespaces[ns] = {"namespace": ns, "created": 1, "owner": "x", "description": ""}
+        _save_namespaces(namespaces)
+        meta = {"files": {}}
+        for path, content in files.items():
+            fp = _file_path(ns, path)
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            with open(fp, "w") as f:
+                f.write(content)
+            meta["files"][path] = {"size": len(content), "sha256": "", "current_version": 1}
+        _save_meta(ns, meta)
+
+    def _package(self, ns, manifest, extra=None):
+        files = {"manifest.json": json.dumps(manifest), "backend/entry.py": "# code"}
+        files.update(extra or {})
+        self._namespace(ns, files)
+
+    def test_list_extensions_sorts_semver_and_returns_latest_manifest(self):
+        self._package("ext/voting/1.10.0", {"name": "Voting", "version": "1.10.0"})
+        self._package("ext/voting/1.2.0", {"name": "Voting", "version": "1.2.0"})
+        self._package("ext/voting/0.9.1", {"name": "Voting", "version": "0.9.1"})
+        self._package("ext/hello_world/0.1.0", {"name": "Hello"})
+        self._namespace("branding/some-realm", {"logo.png": "x"})   # not a package
+        self._namespace("ext/broken/1.0.0", {"backend/entry.py": "x"})  # no manifest yet
+
+        result = json.loads(_mod.list_extensions())
+        self.assertEqual([e["ext_id"] for e in result], ["hello_world", "voting"])
+        voting = result[1]
+        self.assertEqual(voting["versions"], ["0.9.1", "1.2.0", "1.10.0"])
+        self.assertEqual(voting["latest"], "1.10.0")
+        self.assertEqual(voting["manifest"]["version"], "1.10.0")
+
+    def test_list_extensions_empty_registry(self):
+        self.assertEqual(json.loads(_mod.list_extensions()), [])
+
+    def test_list_codices_unified_and_legacy(self):
+        self._package("ext/dominion/0.3.0", {"name": "Dominion", "kind": "codex"})
+        self._package("ext/dominion/0.2.0", {"name": "Dominion", "kind": "codex"})
+        self._package("ext/hello_world/0.1.0", {"name": "Hello"})  # plain extension
+        self._package("codex/membership/1.0.0", {"name": "Membership"})  # legacy
+        self._package("codex/dominion/0.1.0", {"name": "Dominion"})  # older legacy copy
+
+        result = {c["codex_id"]: c for c in json.loads(_mod.list_codices())}
+        self.assertEqual(set(result), {"dominion", "membership"})
+        dominion = result["dominion"]
+        self.assertEqual(dominion["versions"], ["0.1.0", "0.2.0", "0.3.0"])
+        self.assertEqual(dominion["latest"], "0.3.0")
+        self.assertEqual(dominion["namespace_prefix"], "ext")
+        self.assertEqual(result["membership"]["namespace_prefix"], "codex")
+
+    def test_latest_version(self):
+        self._package("ext/voting/1.0.0", {})
+        self._package("ext/voting/1.1.0", {})
+        self._package("codex/membership/2.0.0", {})
+
+        ext = json.loads(_mod.latest_version(json.dumps({"category": "ext", "item_id": "voting"})))
+        self.assertEqual(ext, {"latest": "1.1.0", "namespace": "ext/voting/1.1.0"})
+        codex = json.loads(_mod.latest_version(json.dumps({"category": "codex", "item_id": "membership"})))
+        self.assertEqual(codex["namespace"], "codex/membership/2.0.0")
+
+        self.assertIn("error", json.loads(_mod.latest_version(json.dumps({"category": "ext", "item_id": "nope"}))))
+        self.assertIn("error", json.loads(_mod.latest_version(json.dumps({"category": "wasm", "item_id": "x"}))))
+
+    def test_latest_version_skips_namespace_without_manifest(self):
+        self._package("ext/voting/1.0.0", {})
+        self._namespace("ext/voting/2.0.0", {"backend/entry.py": "mid-upload"})
+        res = json.loads(_mod.latest_version(json.dumps({"category": "ext", "item_id": "voting"})))
+        self.assertEqual(res["latest"], "1.0.0")
+
+    def test_get_extension_manifest_explicit_latest_and_missing(self):
+        self._package("ext/voting/1.0.0", {"name": "Voting", "version": "1.0.0"})
+        self._package("ext/voting/1.1.0", {"name": "Voting", "version": "1.1.0"})
+
+        explicit = json.loads(_mod.get_extension_manifest(json.dumps({"ext_id": "voting", "version": "1.0.0"})))
+        self.assertEqual(explicit["version"], "1.0.0")
+        self.assertEqual(explicit["_version"], "1.0.0")
+        self.assertEqual(explicit["_namespace"], "ext/voting/1.0.0")
+
+        for v in (None, "", "latest", "LATEST"):
+            latest = json.loads(_mod.get_extension_manifest(json.dumps({"ext_id": "voting", "version": v})))
+            self.assertEqual(latest["_version"], "1.1.0", msg=f"version={v!r}")
+
+        missing_version = json.loads(_mod.get_extension_manifest(json.dumps({"ext_id": "voting", "version": "9.9.9"})))
+        self.assertIn("manifest.json not found in ext/voting/9.9.9", missing_version["error"])
+        missing_ext = json.loads(_mod.get_extension_manifest(json.dumps({"ext_id": "nope"})))
+        self.assertIn("No versions found", missing_ext["error"])
+
+    def test_get_extension_manifest_invalid_json(self):
+        self._namespace("ext/bad/1.0.0", {"manifest.json": "{not json"})
+        res = json.loads(_mod.get_extension_manifest(json.dumps({"ext_id": "bad", "version": "1.0.0"})))
+        self.assertIn("Invalid JSON", res["error"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

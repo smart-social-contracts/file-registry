@@ -72,14 +72,19 @@ function _canisterEnv(): Record<string, string> {
 }
 
 function _registryCanisterId(): string {
-  // The asset canister's ic_env cookie carries the live id of every canister in
-  // the project, so it is correct in whatever environment this dist is served
-  // from. It must win over VITE_CANISTER_ID: a dist built against a local
-  // replica otherwise targets a nonexistent canister once deployed to mainnet.
-  // VITE_CANISTER_ID remains a fallback for a standalone dev server, which is
-  // served outside the asset canister and therefore gets no cookie.
+  // Three sources, in order; the same dist is served locally and on mainnet,
+  // so the id must come from the environment, never be baked in:
+  //  1. icp-cli's asset canister sets an `ic_env` cookie with the live id of
+  //     every canister in the project (this repo's own `icp deploy` path).
+  //  2. A Casals sheet publishes this dist into a plain certified-assets
+  //     canister and writes `/canister_ids.js` next to it, which app.html
+  //     loads synchronously: `globalThis.__CANISTER_IDS.file_registry`.
+  //  3. VITE_CANISTER_ID at build time, for a standalone `vite dev` server
+  //     that is served outside any asset canister and gets neither.
   const fromCookie = _canisterEnv()['PUBLIC_CANISTER_ID:ic_file_registry'];
   if (fromCookie) return fromCookie;
+  const fromRuntime = (globalThis as any).__CANISTER_IDS?.file_registry;
+  if (typeof fromRuntime === 'string' && fromRuntime) return fromRuntime;
   return (import.meta.env.VITE_CANISTER_ID as string | undefined) ?? '';
 }
 
@@ -92,8 +97,8 @@ function _makeActor(id: any = null) {
   if (IS_LOCAL) agent.fetchRootKey().catch(() => {});
   if (!CANISTER_ID) {
     throw new Error(
-      'Backend canister ID not found. Expected VITE_CANISTER_ID at build time ' +
-        'or PUBLIC_CANISTER_ID:ic_file_registry in the ic_env cookie.'
+      'Backend canister ID not found. Expected PUBLIC_CANISTER_ID:ic_file_registry in the ' +
+        'ic_env cookie, __CANISTER_IDS.file_registry from /canister_ids.js, or VITE_CANISTER_ID at build time.'
     );
   }
   return Actor.createActor(idlFactory, { agent, canisterId: CANISTER_ID });

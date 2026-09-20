@@ -535,6 +535,207 @@ def get_file_chunk_icc(namespace: text, path: text, offset: text, length: text) 
     }))
 
 
+# ---------------------------------------------------------------------------
+# Package catalog — convention-aware queries over the storage above (issue #3).
+#
+# Extension and codex packages live in namespaces `ext/{id}/{version}` (and
+# legacy `codex/{id}/{version}`), each with a `manifest.json` at its root.
+# Realm backends and the GaaS installer resolve "install hello_world" through
+# these queries before pulling bytes with list_files_icc / get_file_chunk_icc.
+#
+# There is no staging step in this registry — a stored file is live — so a
+# version counts as a package once its manifest.json exists; a namespace still
+# mid-upload is never resolved as `latest`.
+# ---------------------------------------------------------------------------
+
+NS_PREFIX_EXT = "ext/"
+NS_PREFIX_CODEX = "codex/"
+
+
+def _parse_semver(version_str: str) -> tuple:
+    """'1.2.3' -> (1, 2, 3); anything unparsable sorts first."""
+    try:
+        return tuple(int(p) for p in version_str.split("."))
+    except (ValueError, AttributeError):
+        return (0, 0, 0)
+
+
+def _read_manifest(namespace: str):
+    """The parsed manifest.json of a namespace, or None if absent/invalid."""
+    try:
+        with open(_file_path(namespace, "manifest.json"), "r") as f:
+            manifest = json.loads(f.read())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    return manifest if isinstance(manifest, dict) else None
+
+
+def _package_versions(namespaces: dict, prefix: str) -> list:
+    """Versions under `prefix` (e.g. "ext/voting/") whose manifest.json exists,
+    sorted by semver ascending."""
+    versions = []
+    for ns_name in namespaces:
+        if not ns_name.startswith(prefix):
+            continue
+        version = ns_name[len(prefix):]
+        if not version or "/" in version:
+            continue
+        if _read_manifest(ns_name) is None:
+            continue
+        versions.append(version)
+    versions.sort(key=_parse_semver)
+    return versions
+
+
+def _find_latest_version(namespaces: dict, prefix: str) -> str:
+    versions = _package_versions(namespaces, prefix)
+    return versions[-1] if versions else ""
+
+
+def _split_package_namespace(ns_name: str, prefix: str):
+    """"ext/voting/1.2.0" with prefix "ext/" -> ("voting", "1.2.0"); None otherwise."""
+    if not ns_name.startswith(prefix):
+        return None
+    parts = ns_name[len(prefix):].split("/", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1] or "/" in parts[1]:
+        return None
+    return parts[0], parts[1]
+
+
+@query
+def list_extensions() -> text:
+    """List every extension package with its versions.
+
+    Returns JSON: [{"ext_id": str, "versions": [str], "latest": str,
+                    "manifest": dict|null}, ...]
+    `manifest` is the latest version's manifest.json.
+    """
+    namespaces = _load_namespaces()
+    extensions = {}
+    for ns_name in namespaces:
+        split = _split_package_namespace(ns_name, NS_PREFIX_EXT)
+        if split is None:
+            continue
+        ext_id, version = split
+        if _read_manifest(ns_name) is None:
+            continue
+        extensions.setdefault(ext_id, {"ext_id": ext_id, "versions": []})
+        extensions[ext_id]["versions"].append(version)
+
+    result = []
+    for ext_id, info in sorted(extensions.items()):
+        info["versions"].sort(key=_parse_semver)
+        latest = info["versions"][-1]
+        info["latest"] = latest
+        info["manifest"] = _read_manifest(f"{NS_PREFIX_EXT}{ext_id}/{latest}")
+        result.append(info)
+    return json.dumps(result)
+
+
+@query
+def list_codices() -> text:
+    """List every codex package with its versions.
+
+    Covers both namespace conventions:
+      - `ext/{codex_id}/{version}` whose manifest declares "kind": "codex"
+        (unified pipeline) — preferred;
+      - `codex/{codex_id}/{version}` (legacy).
+
+    Returns JSON: [{"codex_id": str, "versions": [str], "latest": str,
+                    "namespace_prefix": "ext"|"codex"}, ...]
+    `namespace_prefix` is that of the latest version — what clients should read.
+    """
+    namespaces = _load_namespaces()
+    codices = {}
+    for ns_name in namespaces:
+        if ns_name.startswith(NS_PREFIX_CODEX):
+            prefix, tag = NS_PREFIX_CODEX, "codex"
+        elif ns_name.startswith(NS_PREFIX_EXT):
+            prefix, tag = NS_PREFIX_EXT, "ext"
+        else:
+            continue
+        split = _split_package_namespace(ns_name, prefix)
+        if split is None:
+            continue
+        manifest = _read_manifest(ns_name)
+        if manifest is None:
+            continue
+        if tag == "ext" and manifest.get("kind") != "codex":
+            continue
+        codex_id, version = split
+        entry = codices.setdefault(
+            codex_id, {"codex_id": codex_id, "versions": [], "_prefixes": {}}
+        )
+        entry["versions"].append(version)
+        entry["_prefixes"][version] = tag
+
+    result = []
+    for codex_id, info in sorted(codices.items()):
+        info["versions"].sort(key=_parse_semver)
+        latest = info["versions"][-1]
+        info["latest"] = latest
+        info["namespace_prefix"] = info.pop("_prefixes")[latest]
+        result.append(info)
+    return json.dumps(result)
+
+
+@query
+def latest_version(args: text) -> text:
+    """Resolve the latest version of an extension or codex.
+
+    Args (JSON): {"category": "ext"|"codex", "item_id": str}
+    Returns JSON: {"latest": str, "namespace": str} | {"error": str}
+    """
+    params = json.loads(args)
+    category = params.get("category", "")
+    item_id = params.get("item_id", "")
+    if category == "ext":
+        prefix = f"{NS_PREFIX_EXT}{item_id}/"
+    elif category == "codex":
+        prefix = f"{NS_PREFIX_CODEX}{item_id}/"
+    else:
+        return json.dumps({"error": f"Unknown category: {category}. Use 'ext' or 'codex'"})
+
+    version = _find_latest_version(_load_namespaces(), prefix)
+    if not version:
+        return json.dumps({"error": f"No versions found for {category}/{item_id}"})
+    return json.dumps({"latest": version, "namespace": f"{prefix}{version}"})
+
+
+@query
+def get_extension_manifest(args: text) -> text:
+    """Return the manifest.json of one extension version.
+
+    Args (JSON): {"ext_id": str, "version": str|null}
+      version null/""/"latest" resolves to the highest version present.
+    Returns JSON: manifest dict + {"_version": str, "_namespace": str} | {"error": str}
+    """
+    params = json.loads(args)
+    ext_id = params.get("ext_id", "")
+    version = params.get("version") or ""
+    if str(version).strip().lower() == "latest":
+        version = ""
+
+    if not version:
+        version = _find_latest_version(_load_namespaces(), f"{NS_PREFIX_EXT}{ext_id}/")
+        if not version:
+            return json.dumps({"error": f"No versions found for extension '{ext_id}'"})
+
+    ns = f"{NS_PREFIX_EXT}{ext_id}/{version}"
+    try:
+        with open(_file_path(ns, "manifest.json"), "r") as f:
+            manifest = json.loads(f.read())
+    except (FileNotFoundError, OSError):
+        return json.dumps({"error": f"manifest.json not found in {ns}"})
+    except json.JSONDecodeError:
+        return json.dumps({"error": f"Invalid JSON in manifest.json for {ns}"})
+    if not isinstance(manifest, dict):
+        return json.dumps({"error": f"manifest.json in {ns} is not an object"})
+    manifest["_version"] = version
+    manifest["_namespace"] = ns
+    return json.dumps(manifest)
+
+
 @query
 def get_stats() -> text:
     """Return overall registry statistics."""

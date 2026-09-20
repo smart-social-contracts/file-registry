@@ -42,6 +42,21 @@ Files are stored in the canister's persistent filesystem (`/registry/...`), back
 | `get_acl()` | — | Publisher ACL for all namespaces |
 | `http_request(req)` | HTTP | Serve files via HTTP with CORS |
 
+### Package catalog (no auth)
+
+Extension and codex packages are plain namespaces that follow a convention: `ext/{id}/{version}`
+(or legacy `codex/{id}/{version}`) with a `manifest.json` at the root. These queries resolve
+"install `hello_world`" to a namespace, which callers then read with the generic API above.
+A version counts as a package once its `manifest.json` exists, so a namespace still mid-upload
+is never resolved as latest. (Issue [#3](https://github.com/smart-social-contracts/file-registry/issues/3).)
+
+| Method | Args | Returns |
+|---|---|---|
+| `list_extensions()` | — | `[{ext_id, versions, latest, manifest}]` — `manifest` is the latest version's |
+| `list_codices()` | — | `[{codex_id, versions, latest, namespace_prefix}]` — `ext/…` packages whose manifest has `"kind": "codex"`, plus legacy `codex/…` |
+| `latest_version(args)` | `{category: "ext"\|"codex", item_id}` | `{latest, namespace}` |
+| `get_extension_manifest(args)` | `{ext_id, version?}` | the manifest plus `_version` and `_namespace`; `version` null or `"latest"` picks the highest |
+
 ### Authenticated updates (publisher or controller)
 | Method | Args | Description |
 |---|---|---|
@@ -118,11 +133,29 @@ CANISTER_CANDID_PATH=./ic_file_registry.did python3 -m basilisk ic_file_registry
 icp deploy            # add --network ic for mainnet
 ```
 
-Set `VITE_CANISTER_ID` to your backend canister ID before building the frontend if you build it
-manually:
+### How the frontend finds its backend
+
+The same `frontend/dist` is served locally and on mainnet, so the backend id is resolved at
+runtime, in this order (`frontend/src/lib/api.ts`):
+
+1. `PUBLIC_CANISTER_ID:ic_file_registry` in the `ic_env` cookie — set by icp-cli's asset
+   canister, i.e. the `icp deploy` path above.
+2. `globalThis.__CANISTER_IDS.file_registry` from `/canister_ids.js`, loaded by `app.html` —
+   the path used when a Casals sheet publishes the dist into a plain certified-assets canister
+   (`realms/casals.json`, stand `file-registry`, canister `fleet-file-registry-frontend`) and
+   writes that file next to it.
+3. `VITE_CANISTER_ID` at build time — only for a standalone `vite dev` server.
+
+### Building the dist for a Casals sheet
+
 ```bash
-VITE_CANISTER_ID=<your-canister-id> npm --prefix frontend run build
+make build            # backend wasm + frontend/dist
+make build-frontend   # frontend/dist only (npm ci + vite build)
 ```
+
+The orchestrator scripts (`realms/scripts/up.sh`, `gos-as-a-service/scripts/up.sh`) run these
+from a sibling checkout; the sheets reference `../file-registry/.basilisk/…` and
+`../file-registry/frontend/dist` as `local:` sources.
 
 ## File size limits
 

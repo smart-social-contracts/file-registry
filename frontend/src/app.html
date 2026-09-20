@@ -4,6 +4,10 @@
     <meta charset="utf-8" />
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Runtime backend id when this dist is served by a Casals-managed asset
+         canister (the sheet writes /canister_ids.js). Absent under icp-cli's own
+         deploy, where the ic_env cookie carries the id; a 404 here is harmless. -->
+    <script src="/canister_ids.js"></script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">
