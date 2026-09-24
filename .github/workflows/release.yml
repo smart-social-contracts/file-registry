@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python deps
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt
+
+      - name: Build backend and frontend
+        run: make build
+
+      - name: Pack release assets
+        run: |
+          gzip -kf .basilisk/ic_file_registry/ic_file_registry.wasm
+          cp .basilisk/ic_file_registry/ic_file_registry.wasm.gz ./file_registry.wasm.gz
+          git clone --depth 1 https://github.com/smart-social-contracts/Casals /tmp/casals
+          (cd /tmp/casals && python3 -m casals_cli.bundle "$GITHUB_WORKSPACE/frontend/dist" \
+            -o "$GITHUB_WORKSPACE/file_registry_frontend.tar.gz" \
+            --manifest "$GITHUB_WORKSPACE/file_registry_frontend.manifest.json")
+
+      - name: Compute checksums
+        run: |
+          echo "# SHA-256 checksums for release assets" > checksums.txt
+          sha256sum file_registry.wasm.gz file_registry_frontend.tar.gz >> checksums.txt
+          python3 - << 'PY' >> checksums.txt
+          import gzip, hashlib, json, pathlib
+          data = gzip.decompress(pathlib.Path("file_registry.wasm.gz").read_bytes())
+          print("# module sha256 (decompressed wasm; pin this on registry.wasms)")
+          print(f"{hashlib.sha256(data).hexdigest()}  file_registry.wasm.gz (module)")
+          man = json.load(open("file_registry_frontend.manifest.json"))
+          print("# bundle hash (pin this on registry.bundles)")
+          print(f"{man['bundle_sha256']}  file_registry_frontend.tar.gz (bundle)")
+          PY
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            file_registry.wasm.gz
+            file_registry_frontend.tar.gz
+            file_registry_frontend.manifest.json
+            checksums.txt
