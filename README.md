@@ -153,9 +153,8 @@ make build            # backend wasm + frontend/dist
 make build-frontend   # frontend/dist only (npm ci + vite build)
 ```
 
-The orchestrator scripts (`realms/scripts/up.sh`, `gos-as-a-service/scripts/up.sh`) run these
-from a sibling checkout; the sheets reference `../file-registry/.basilisk/…` and
-`../file-registry/frontend/dist` as `local:` sources.
+`make build` produces the wasm and `frontend/dist`. The Realms and GaaS sheets
+install the published release instead of these local paths.
 
 ## File size limits
 
