@@ -1427,6 +1427,14 @@ def _handle_http(req: dict) -> dict:
         body = list_namespaces().encode("utf-8")
         return _http_response(200, body, "application/json")
 
+    # Catalog routes the realm package manager fetches. These are not files.
+    if path == "api/extensions":
+        body = list_extensions().encode("utf-8")
+        return _http_response(200, body, "application/json")
+    if path == "api/codices":
+        body = list_codices().encode("utf-8")
+        return _http_response(200, body, "application/json")
+
     parts = path.split("/", 1)
     if len(parts) < 2:
         body = json.dumps({"error": "Path must be /{namespace}/{file_path}"}).encode()

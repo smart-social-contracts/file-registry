@@ -648,5 +648,23 @@ class TestPackageCatalog(unittest.TestCase):
         self.assertIn("Invalid JSON", res["error"])
 
 
+class TestCatalogHttpRoutes(unittest.TestCase):
+    def test_api_routes_are_not_file_lookups(self):
+        original_ext = _mod.list_extensions
+        original_codex = _mod.list_codices
+        _mod.list_extensions = lambda: '[{"ext_id":"agora"}]'
+        _mod.list_codices = lambda: '[{"codex_id":"common"}]'
+        try:
+            ext = _mod._handle_http({"method": "GET", "url": "/api/extensions"})
+            codex = _mod._handle_http({"method": "GET", "url": "/api/codices?x=1"})
+        finally:
+            _mod.list_extensions = original_ext
+            _mod.list_codices = original_codex
+        self.assertEqual(ext["status_code"], 200)
+        self.assertEqual(ext["body"], b'[{"ext_id":"agora"}]')
+        self.assertEqual(codex["status_code"], 200)
+        self.assertEqual(codex["body"], b'[{"codex_id":"common"}]')
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
