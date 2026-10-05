@@ -45,7 +45,7 @@ jobs:
       - name: Compute checksums
         run: |
           echo "# SHA-256 checksums for release assets" > checksums.txt
-          sha256sum file_registry.wasm.gz file_registry_frontend.tar.gz >> checksums.txt
+          sha256sum file_registry.wasm.gz file_registry_frontend.tar.gz file_registry_frontend.manifest.json >> checksums.txt
           python3 - << 'PY' >> checksums.txt
           import gzip, hashlib, json, pathlib
           data = gzip.decompress(pathlib.Path("file_registry.wasm.gz").read_bytes())
@@ -63,6 +63,9 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
           generate_release_notes: true
+          # Stays a draft until the checksum file is signed with the release key
+          # (smart-social-contracts/.github scripts/sign-release.sh).
+          draft: true
           files: |
             file_registry.wasm.gz
             file_registry_frontend.tar.gz
