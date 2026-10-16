@@ -23,7 +23,6 @@ import base64
 import hashlib
 import json
 import os
-import re
 from typing import Tuple
 
 from basilisk import (
@@ -60,8 +59,22 @@ WILDCARD_NAMESPACE = "*"  # ACL key: publish on every namespace
 # version namespace at a time, under the rules in _delegated_grant_error.
 GRANTERS_NAMESPACE = "_granters"
 DELEGABLE_KINDS = ("ext", "codex", "assistant")
-_ID_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+# basilisk's CPython has no `re` (its import hook hands back an empty stub).
+_ALNUM = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+
+
+def _is_id_segment(s: str) -> bool:
+    return bool(s) and s[0] in _ALNUM and all(c in _ALNUM or c in "_.-" for c in s)
+
+
+def _is_semver(v: str) -> bool:
+    """1.2.3, optionally followed by -pre or +build of [0-9A-Za-z.-]."""
+    cut = min([i for i in (v.find("-"), v.find("+")) if i >= 0], default=len(v))
+    core, suffix = v[:cut], v[cut + 1:]
+    nums = core.split(".")
+    if len(nums) != 3 or not all(n and all(c in "0123456789" for c in n) for n in nums):
+        return False
+    return cut == len(v) or (bool(suffix) and all(c in _ALNUM or c in ".-" for c in suffix))
 
 CONTENT_TYPES = {
     ".py":   "text/plain",
@@ -1085,8 +1098,8 @@ def _delegated_grant_error(namespace: str, principal: str) -> str | None:
     if (
         len(parts) not in (3, 4)
         or parts[0] not in DELEGABLE_KINDS
-        or not all(_ID_SEGMENT_RE.match(p) for p in parts[1:-1])
-        or not _VERSION_RE.match(parts[-1])
+        or not all(_is_id_segment(p) for p in parts[1:-1])
+        or not _is_semver(parts[-1])
     ):
         return (
             "granters may only grant <kind>/<id>/<version> namespaces "

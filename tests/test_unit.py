@@ -571,6 +571,16 @@ class TestDelegatedGrants(unittest.TestCase):
                                                "owner": self.DEV, "description": ""}})
         self.assertTrue(self._grant("ext/voting/1.1.0")["ok"])
 
+    def test_version_and_id_rules(self):
+        for v in ("0.1.0", "10.20.30", "1.0.0-rc.1", "1.0.0+build.5", "2.0.0-beta-2"):
+            self.assertTrue(_mod._is_semver(v), v)
+        for v in ("", "1.0", "1.0.0.0", "v1.0.0", "1.0.0-", "1.0.0+", "1.a.0", "1.0.0-rc_1", "main"):
+            self.assertFalse(_mod._is_semver(v), v)
+        for s in ("voting", "a", "x_y-z.1", "9lives"):
+            self.assertTrue(_mod._is_id_segment(s), s)
+        for s in ("", ".hidden", "-x", "_x", "a b", "a/b", "é"):
+            self.assertFalse(_mod._is_id_segment(s), s)
+
     def test_revoke_stays_controller_only(self):
         self._as_granter({"ext/voting/1.0.0": [self.DEV]})
         result = json.loads(_mod.revoke_publish(json.dumps({
