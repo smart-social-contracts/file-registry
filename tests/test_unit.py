@@ -491,6 +491,94 @@ class TestPublisherAcl(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Test: grant_publish by controllers and by _granters
+# ---------------------------------------------------------------------------
+
+class TestDelegatedGrants(unittest.TestCase):
+
+    GRANTER = "marketplace-canister"
+    DEV = "dev-principal"
+
+    def setUp(self):
+        TestPublisherAcl.setUp(self)
+        _mock_ic.set_caller(self.GRANTER)
+
+    def tearDown(self):
+        TestPublisherAcl.tearDown(self)
+
+    def _grant(self, namespace, principal=None):
+        return json.loads(_mod.grant_publish(json.dumps({
+            "namespace": namespace, "principal": principal or self.DEV,
+        })))
+
+    def _as_granter(self, acl=None):
+        _save_acl({_mod.GRANTERS_NAMESPACE: [self.GRANTER], **(acl or {})})
+
+    def test_plain_caller_cannot_grant(self):
+        result = self._grant("ext/voting/1.0.0")
+        self.assertIn("controller", result["error"])
+        self.assertEqual(_load_acl(), {})
+
+    def test_controller_grants_anything(self):
+        _mock_ic.set_controller(True)
+        self.assertTrue(self._grant("*")["ok"])
+        self.assertEqual(_load_acl(), {"*": [self.DEV]})
+
+    def test_granter_grants_a_new_package_version(self):
+        self._as_granter()
+        self.assertTrue(self._grant("ext/voting/1.0.0")["ok"])
+        self.assertIn(self.DEV, _load_acl()["ext/voting/1.0.0"])
+        _mock_ic.set_caller(self.DEV)
+        self.assertIsNone(_require_publisher("ext/voting/1.0.0"))
+
+    def test_granter_grants_two_segment_ids(self):
+        self._as_granter()
+        self.assertTrue(self._grant("codex/syntropia/membership/0.1.0")["ok"])
+        self.assertTrue(self._grant("assistant/acme/helper/2.0.0-beta.1")["ok"])
+
+    def test_granter_cannot_grant_wildcard_reserved_or_malformed(self):
+        self._as_granter()
+        for ns in ("*", "_approvers", "_granters", "ext/voting", "ext/voting/main",
+                   "other/voting/1.0.0", "ext/../x/1.0.0", "ext/a/b/c/1.0.0", "ext//1.0.0"):
+            with self.subTest(ns=ns):
+                self.assertIn("Unauthorized", self._grant(ns)["error"])
+        self.assertEqual(set(_load_acl()), {_mod.GRANTERS_NAMESPACE})
+
+    def test_granter_cannot_grant_anonymous(self):
+        self._as_granter()
+        self.assertIn("error", self._grant("ext/voting/1.0.0", ANONYMOUS_PRINCIPAL))
+
+    def test_granter_cannot_hand_someone_elses_package_to_a_newcomer(self):
+        self._as_granter()
+        _save_namespaces({"ext/voting/1.0.0": {"namespace": "ext/voting/1.0.0", "created": 0,
+                                               "owner": "operator", "description": ""}})
+        result = self._grant("ext/voting/9.9.9")
+        self.assertIn("someone else", result["error"])
+        self.assertNotIn("ext/voting/9.9.9", _load_acl())
+
+    def test_pending_grant_reserves_the_package(self):
+        self._as_granter()
+        self.assertTrue(self._grant("ext/voting/1.0.0")["ok"])
+        self.assertIn("someone else", self._grant("ext/voting/1.1.0", "intruder")["error"])
+
+    def test_nested_ids_count_toward_the_package_root(self):
+        self._as_granter({"codex/syntropia/membership/0.1.0": ["operator"]})
+        self.assertIn("someone else", self._grant("codex/syntropia/2.0.0")["error"])
+
+    def test_granter_grants_new_versions_to_the_existing_publisher(self):
+        self._as_granter({"ext/voting/1.0.0": [self.DEV]})
+        _save_namespaces({"ext/voting/1.0.0": {"namespace": "ext/voting/1.0.0", "created": 0,
+                                               "owner": self.DEV, "description": ""}})
+        self.assertTrue(self._grant("ext/voting/1.1.0")["ok"])
+
+    def test_revoke_stays_controller_only(self):
+        self._as_granter({"ext/voting/1.0.0": [self.DEV]})
+        result = json.loads(_mod.revoke_publish(json.dumps({
+            "namespace": "ext/voting/1.0.0", "principal": self.DEV})))
+        self.assertIn("controller", result["error"])
+
+
+# ---------------------------------------------------------------------------
 # Test: _http_response helper
 # ---------------------------------------------------------------------------
 

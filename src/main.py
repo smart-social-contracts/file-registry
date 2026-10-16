@@ -23,6 +23,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 from typing import Tuple
 
 from basilisk import (
@@ -55,6 +56,12 @@ CONFIG_FILE = "/registry/_config.json"
 MAX_VERSIONS = 20
 ANONYMOUS_PRINCIPAL = "2vxsx-fae"
 WILDCARD_NAMESPACE = "*"  # ACL key: publish on every namespace
+# ACL key: principals (a marketplace) that may grant publish on one package
+# version namespace at a time, under the rules in _delegated_grant_error.
+GRANTERS_NAMESPACE = "_granters"
+DELEGABLE_KINDS = ("ext", "codex", "assistant")
+_ID_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 
 CONTENT_TYPES = {
     ".py":   "text/plain",
@@ -1066,20 +1073,55 @@ def set_config(args: text) -> text:
     return json.dumps({"ok": True, "config": config})
 
 
+def _delegated_grant_error(namespace: str, principal: str) -> str | None:
+    """Why a granter may not give `principal` publish on `namespace`, or None.
+
+    A granter only hands out `<kind>/<id>[/<sub>]/<version>` namespaces, and
+    only to a principal that already publishes everything under
+    `<kind>/<id>/`: otherwise a newcomer could add a "latest" version to a
+    package someone else owns.
+    """
+    parts = namespace.split("/")
+    if (
+        len(parts) not in (3, 4)
+        or parts[0] not in DELEGABLE_KINDS
+        or not all(_ID_SEGMENT_RE.match(p) for p in parts[1:-1])
+        or not _VERSION_RE.match(parts[-1])
+    ):
+        return (
+            "granters may only grant <kind>/<id>/<version> namespaces "
+            f"(kind one of {', '.join(DELEGABLE_KINDS)}, semver version)"
+        )
+    if not principal or principal == ANONYMOUS_PRINCIPAL:
+        return "principal is required"
+    root = f"{parts[0]}/{parts[1]}"
+    acl = _load_acl()
+    for existing in set(_load_namespaces()) | set(acl):
+        if (existing == root or existing.startswith(root + "/")) and principal not in acl.get(existing, []):
+            return f"'{root}' is already published by someone else"
+    return None
+
+
 @update
 def grant_publish(args: text) -> text:
-    """Grant publish access to a principal for a namespace. Controller only.
+    """Grant publish access to a principal for a namespace.
+
+    Controllers may grant anything. A principal on ``_granters`` may grant
+    one package version namespace at a time (see _delegated_grant_error).
 
     Args (JSON): {"namespace": str, "principal": str}; namespace "*" grants
     every namespace (fleet publisher).
     """
-    err = _require_controller()
-    if err:
-        return err
-
     params = json.loads(args)
     namespace = params["namespace"]
     principal = params["principal"]
+
+    if not ic.is_controller(ic.caller()):
+        if ic.caller().to_str() not in _load_acl().get(GRANTERS_NAMESPACE, []):
+            return json.dumps({"error": "Unauthorized: caller is not a controller or a granter"})
+        err = _delegated_grant_error(namespace, principal)
+        if err:
+            return json.dumps({"error": f"Unauthorized: {err}"})
 
     acl = _load_acl()
     ns_acl = acl.setdefault(namespace, [])

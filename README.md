@@ -65,10 +65,16 @@ is never resolved as latest. (Issue [#3](https://github.com/smart-social-contrac
 | `finalize_chunked_file(args)` | `{namespace, path}` | Assemble chunks into file |
 | `delete_file(args)` | `{namespace, path}` | Delete a file |
 
+### Controller or granter
+| Method | Args | Description |
+|---|---|---|
+| `grant_publish(args)` | `{namespace, principal}` | Grant upload access. A principal on the `_granters` ACL (a marketplace) may grant only `<kind>/<id>[/<sub>]/<version>` namespaces (`kind` ext, codex or assistant; semver version), and only to a principal that already publishes every namespace under `<kind>/<id>/` |
+
+A controller makes a canister a granter with `grant_publish {"namespace": "_granters", "principal": "<canister id>"}`.
+
 ### Controller-only
 | Method | Args | Description |
 |---|---|---|
-| `grant_publish(args)` | `{namespace, principal}` | Grant upload access |
 | `revoke_publish(args)` | `{namespace, principal}` | Revoke upload access |
 | `delete_namespace(args)` | `{namespace}` | Delete namespace + all files |
 | `update_namespace(args)` | `{namespace, description}` | Update namespace metadata |
